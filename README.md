@@ -189,13 +189,18 @@ void loop()
 
 # Endpoints
 
-### GET /
+
+## GET /
+
++ AP and API mode
 
 > Gets the HTML page that is used to set the Wifi SSID and password.
 
 + Response 200 *(text/html)*
 
-### POST /
+## POST /
+
++ AP and API mode
 
 > Sets the Wifi SSID and password. The form example can be found in the ```data``` directory.
 
@@ -214,7 +219,25 @@ ssid=access point&password=some password
 }
 ```
 
-### GET /settings
+## GET /scan
+
++ AP and API mode
+
+> Scans visible networks
+
++ Response 200 *(application/json)*
+
+```json
+{
+  "ssid": "access point name",
+  "strength": *int*, 
+  "security": "none" *or* "enabled"
+}
+```
+
+## GET /settings
+
++ API mode
 
 > Gets the settings set in ```addParameter```.
 
@@ -227,7 +250,9 @@ ssid=access point&password=some password
 }
 ```
 
-### PUT /settings
+## PUT /settings
+
++ API mode
 
 > Sets the settings set in ```addParameter```.
 
