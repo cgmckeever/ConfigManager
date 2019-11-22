@@ -19,7 +19,9 @@
 #include "ArduinoJson.h"
 
 #define WIFI_OFFSET 2
-#define CONFIG_OFFSET 98
+#define SSID_LENGTH 32
+#define PASSWORD_LENGTH 64
+#define CONFIG_OFFSET 98 // sum of previous
 
 #if defined(ARDUINO_ARCH_ESP8266) //ESP8266
     using WebServer = ESP8266WebServer;
@@ -47,6 +49,7 @@ public:
     virtual ParameterMode getMode() = 0;
     virtual void fromJson(JsonObject *json) = 0;
     virtual void toJson(JsonObject *json) = 0;
+    virtual void clearData() = 0;
 };
 
 /**
@@ -80,6 +83,10 @@ public:
         }
     }
 
+    void clearData() {
+        *ptr = NULL;
+    }
+
 private:
     const char *name;
     T *ptr;
@@ -107,7 +114,7 @@ public:
         if (json->containsKey(name) && json->is<char *>(name)) {
             const char * value = json->get<const char *>(name);
 
-            memset(ptr,'\n',length);
+            memset(ptr, NULL, length);
             strncpy(ptr, const_cast<char*>(value), length - 1);
         }
     }
@@ -115,6 +122,12 @@ public:
     void toJson(JsonObject *json) {
         json->set(name, ptr);
     }
+
+    void clearData() {
+        memset(ptr, NULL, length);
+        strncpy(ptr, "", length - 1);
+    }
+    
 
 private:
     const char *name;
@@ -142,6 +155,8 @@ public:
     void loop();
     void streamFile(const char *file, const char mime[]);
     void handleNotFound();
+    void clearSettings(bool reboot);
+    void clearWifiSettings(bool reboot);
 
     template<typename T>
     void begin(T &config) {
@@ -206,6 +221,7 @@ private:
 
     void readConfig();
     void writeConfig();
+    void storeWifiSettings(String ssid, String password, bool reset);
     boolean isIp(String str);
     String toStringIP(IPAddress ip);
 };

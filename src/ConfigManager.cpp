@@ -1,7 +1,8 @@
 #include "ConfigManager.h"
 
 const byte DNS_PORT = 53;
-const char magicBytes[2] = {'C', 'M'};
+const char magicBytesSet[2] = {'C', 'M'};
+const char magicBytesEmpty[2] = {NULL, NULL};
 
 const char mimeHTML[] PROGMEM = "text/html";
 const char mimeJSON[] PROGMEM = "application/json";
@@ -104,8 +105,6 @@ void ConfigManager::handleAPPost() {
     bool isJson = server->header("Content-Type") == FPSTR(mimeJSON);
     String ssid;
     String password;
-    char ssidChar[32];
-    char passwordChar[64];
 
     if (isJson) {
         JsonObject& obj = this->decodeJson(server->arg("plain"));
@@ -118,21 +117,14 @@ void ConfigManager::handleAPPost() {
     }
 
     if (ssid.length() == 0) {
-        server->send(400, FPSTR(mimePlain), F("Invalid ssid or password."));
+        server->send(400, FPSTR(mimePlain), F("Invalid ssid."));
         return;
     }
 
-    strncpy(ssidChar, ssid.c_str(), sizeof(ssidChar));
-    strncpy(passwordChar, password.c_str(), sizeof(passwordChar));
-
-
-    EEPROM.put(0, magicBytes);
-    EEPROM.put(WIFI_OFFSET, ssidChar);
-    EEPROM.put(WIFI_OFFSET + 32, passwordChar);
-    EEPROM.commit();
+    storeWifiSettings(ssid, password, false);
 
     server->send(204, FPSTR(mimePlain), F("Saved. Will attempt to reboot."));
-
+    
     ESP.restart();
 }
 
@@ -251,18 +243,18 @@ bool ConfigManager::wifiConnected() {
 }
 
 void ConfigManager::setup() {
-    char magic[2];
-    char ssid[32];
-    char password[64];
+    char magic[WIFI_OFFSET];
+    char ssid[SSID_LENGTH];
+    char password[PASSWORD_LENGTH];
 
     DebugPrintln(F("Reading saved configuration"));
 
     EEPROM.get(0, magic);
     EEPROM.get(WIFI_OFFSET, ssid);
-    EEPROM.get(WIFI_OFFSET + 32, password);
+    EEPROM.get(WIFI_OFFSET + SSID_LENGTH, password);
     readConfig();
 
-    if (memcmp(magic, magicBytes, 2) == 0) {
+    if (memcmp(magic, magicBytesSet, 2) == 0) {
         WiFi.begin(ssid, password[0] == '\0' ? NULL : password);
         if (wifiConnected()) {
             DebugPrint(F("Connected to "));
@@ -296,6 +288,9 @@ void ConfigManager::startAP() {
     IPAddress NMask(255, 255, 255, 0);
     WiFi.softAPConfig(ip, ip, NMask);
 	
+    DebugPrint("AP Name: ");
+    DebugPrintln(apName);
+
     IPAddress myIP = WiFi.softAPIP();
     DebugPrint("AP IP address: ");
     DebugPrintln(myIP);
@@ -340,6 +335,45 @@ void ConfigManager::createBaseWebServer() {
     server->on("/", HTTPMethod::HTTP_POST, std::bind(&ConfigManager::handleAPPost, this));
     server->on("/scan", HTTPMethod::HTTP_GET, std::bind(&ConfigManager::handleScanGet, this));
     server->onNotFound(std::bind(&ConfigManager::handleNotFound, this));
+}
+
+
+void ConfigManager::clearWifiSettings(bool reboot) {
+    char ssid[SSID_LENGTH];
+    char password[PASSWORD_LENGTH];
+    memset(ssid, NULL, SSID_LENGTH);
+    memset(password, NULL, PASSWORD_LENGTH);
+    storeWifiSettings(ssid, password, true);
+
+    if (reboot) {
+        ESP.restart();
+    }
+}
+
+void ConfigManager::storeWifiSettings(String ssid, String password, bool reset) {
+    char ssidChar[SSID_LENGTH];
+    char passwordChar[PASSWORD_LENGTH];
+
+    strncpy(ssidChar, ssid.c_str(), SSID_LENGTH);
+    strncpy(passwordChar, password.c_str(), PASSWORD_LENGTH);
+
+    EEPROM.put(0, reset ? magicBytesEmpty : magicBytesSet);
+    EEPROM.put(WIFI_OFFSET, ssidChar);
+    EEPROM.put(WIFI_OFFSET + SSID_LENGTH, passwordChar);
+    EEPROM.commit();
+}
+
+void ConfigManager::clearSettings(bool reboot) {
+    std::list<BaseParameter*>::iterator it;
+    for (it = parameters.begin(); it != parameters.end(); ++it) {
+        (*it)->clearData();
+    }
+
+    writeConfig();
+
+    if (reboot) {
+        ESP.restart();
+    }
 }
 
 void ConfigManager::readConfig() {
