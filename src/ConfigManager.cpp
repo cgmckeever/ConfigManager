@@ -16,68 +16,81 @@ bool DEBUG_MODE = false;
 // Setup and Loop
 //
 void ConfigManager::setup() {
-  char magic[MAGIC_LENGTH];
-  char ssid[SSID_LENGTH];
-  char password[PASSWORD_LENGTH];
+  this->mode = basic;
 
-  DebugPrintln(F("Reading saved configuration"));
+  if (!this->disabledWIFI) {
+    char magic[MAGIC_LENGTH];
+    char ssid[SSID_LENGTH];
+    char password[PASSWORD_LENGTH];
 
-  DebugPrint(F("MAC: "));
-  DebugPrintln(WiFi.macAddress());
+    DebugPrint(F("MAC: "));
+    DebugPrintln(WiFi.macAddress());
 
-  EEPROM.get(0, magic);
-  EEPROM.get(MAGIC_LENGTH, ssid);
-  DebugPrint(F("SSID: \""));
-  DebugPrint(ssid);
-  DebugPrintln(F("\""));
-  EEPROM.get(MAGIC_LENGTH + SSID_LENGTH, password);
-  readConfig();
+    DebugPrintln(F("Reading saved configuration"));
+    EEPROM.get(0, magic);
+    EEPROM.get(MAGIC_LENGTH, ssid);
+    DebugPrint(F("SSID: \""));
+    DebugPrint(ssid);
+    DebugPrintln(F("\""));
+    EEPROM.get(MAGIC_LENGTH + SSID_LENGTH, password);
+    readConfig();
 
-  if (memcmp(magic, magicBytes, MAGIC_LENGTH) == 0) {
-    WiFi.begin(ssid, password[0] == '\0' ? NULL : password);
-    if (wifiConnected()) {
-      DebugPrint(F("Connected to "));
-      DebugPrint(ssid);
-      DebugPrint(F(" with "));
-      DebugPrintln(WiFi.localIP());
+    if (memcmp(magic, magicBytes, MAGIC_LENGTH) == 0) {
+      WiFi.begin(ssid, password[0] == '\0' ? NULL : password);
 
-      WiFi.mode(WIFI_STA);
-      startApi();
-      return;
+      if (wifiConnected()) {
+        DebugPrint(F("Connected to "));
+        DebugPrint(ssid);
+        DebugPrint(F(" with "));
+        DebugPrintln(WiFi.localIP());
+
+        WiFi.mode(WIFI_STA);
+      }
+    } else {
+      // We are at a cold start, don't bother timing out.
+      DebugPrint(F("MagicBytes mismatch - SSID: "));
+      DebugPrintln(ssid);
+      apTimeout = 0;
     }
-  } else {
-    // We are at a cold start, don't bother timing out.
-    DebugPrint(F("MagicBytes mismatch - SSID: "));
-    DebugPrintln(ssid);
-    apTimeout = 0;
+
+    if (this->getMode() != wifi) {
+      startAP();
+    }
   }
 
-  startAP();
+  if (!this->disabledHTTP) {
+    (this->getMode() == ap) ? startConfigApi() : startApi();
+  }
+
+  DebugPrint("enum MODE: ");
+  DebugPrint(this->getMode());
 }
 
 void ConfigManager::loop() {
-  if (mode == ap && apTimeout > 0 &&
-      ((millis() - apStart) / 1000) > (uint16_t)apTimeout) {
-    ESP.restart();
+
+  if (!this->disabledWIFI && this->getMode() == ap) {
+    if (apTimeout > 0 &&
+        ((millis() - apStart) / 1000) > (uint16_t)apTimeout) {
+      ESP.restart();
+    }
+
+    if (dnsServer) {
+      dnsServer->processNextRequest();
+    }
   }
 
-  if (dnsServer) {
-    dnsServer->processNextRequest();
-  }
-
-  if (server) {
+  if (!this->disabledHTTP && server) {
     server->handleClient();
   }
 }
-
-//
-// ConfigManager AP Utilities 
-//
 
 Mode ConfigManager::getMode() {
   return this->mode;
 }
 
+//
+// ConfigManager AP Utilities
+//
 void ConfigManager::setAPName(const char* name) {
   this->apName = (char*)name;
 }
@@ -95,7 +108,7 @@ void ConfigManager::setAPTimeout(const int timeout) {
 }
 
 void ConfigManager::startAP() {
-  mode = ap;
+  this->mode = ap;
 
   DebugPrintln(F("Starting Access Point"));
 
@@ -119,25 +132,31 @@ void ConfigManager::startAP() {
   dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
   dnsServer->start(DNS_PORT, "*", ip);
 
+  apStart = millis();
+}
+
+void ConfigManager::startConfigApi() {
+  this->mode = configApi;
+  DebugPrintln(F("ConfigApi Mode"));
   createBaseWebServer();
+
 
   if (apCallback) {
     apCallback(server.get());
   }
 
   server->begin();
-
-  apStart = millis();
 }
 
 void ConfigManager::startApi() {
-  mode = api;
-
+  this->mode = api;
+  DebugPrintln(F("API Mode"));
   createBaseWebServer();
+
   server->on("/settings", HTTPMethod::HTTP_GET,
-             std::bind(&ConfigManager::handleRESTGet, this));
+             std::bind(&ConfigManager::handleSettingsGetREST, this));
   server->on("/settings", HTTPMethod::HTTP_PUT,
-             std::bind(&ConfigManager::handleRESTPut, this));
+             std::bind(&ConfigManager::handleSettingsPutREST, this));
 
   if (apiCallback) {
     apiCallback(server.get());
@@ -157,6 +176,10 @@ void ConfigManager::setAPICallback(std::function<void(WebServer*)> callback) {
 //
 // ConfigManager Wifi Utilitiees
 //
+void ConfigManager::disableWIFI() {
+  this->disabledWIFI = true;
+}
+
 void ConfigManager::setWifiConnectRetries(const int retries) {
   this->wifiConnectRetries = retries;
 }
@@ -172,6 +195,7 @@ bool ConfigManager::wifiConnected() {
   while (i < wifiConnectRetries) {
     if (WiFi.status() == WL_CONNECTED) {
       DebugPrintln("");
+      this->mode = wifi;
       return true;
     }
 
@@ -232,6 +256,45 @@ void ConfigManager::clearWifiSettings(bool reboot) {
   }
 }
 
+String ConfigManager::scanNetworks() {
+  DynamicJsonDocument doc(1024);
+  JsonArray jsonArray = doc.createNestedArray();
+
+  DebugPrintln("Scanning WiFi networks...");
+  int n = WiFi.scanNetworks();
+  DebugPrintln("scan complete");
+  if (n == 0) {
+    DebugPrintln("no networks found");
+  } else {
+    DebugPrint(n);
+    DebugPrintln(" networks found:");
+
+    for (int i = 0; i < n; ++i) {
+      String ssid = WiFi.SSID(i);
+      int rssi = WiFi.RSSI(i);
+      String security =
+          WiFi.encryptionType(i) == WIFI_OPEN ? "none" : "enabled";
+
+      DebugPrint("Name: ");
+      DebugPrint(ssid);
+      DebugPrint(" - Strength: ");
+      DebugPrint(rssi);
+      DebugPrint(" - Security: ");
+      DebugPrintln(security);
+
+      JsonObject obj = doc.createNestedObject();
+      obj["ssid"] = ssid;
+      obj["strength"] = rssi;
+      obj["security"] = security == "none" ? false : true;
+      jsonArray.add(obj);
+    }
+  }
+
+  String jsonSerialized;
+  serializeJson(jsonArray, jsonSerialized);
+  return jsonSerialized;
+}
+
 //
 // ConfigManager Config Utilities
 //
@@ -265,6 +328,22 @@ void ConfigManager::readConfig() {
   }
 }
 
+JsonObject ConfigManager::asJson() {
+  DynamicJsonDocument doc(1024);
+  JsonObject obj = doc.createNestedObject();
+
+  std::list<BaseParameter*>::iterator it;
+  for (it = parameters.begin(); it != parameters.end(); ++it) {
+    if ((*it)->getMode() == set) {
+      continue;
+    }
+
+    (*it)->toJson(&obj);
+  }
+
+  return obj;
+}
+
 void ConfigManager::writeConfig() {
   byte* ptr = (byte*)config;
 
@@ -272,6 +351,19 @@ void ConfigManager::writeConfig() {
     EEPROM.write(CONFIG_OFFSET + i, *(ptr++));
   }
   EEPROM.commit();
+}
+
+void ConfigManager::updateFromJson(JsonObject obj) {
+  std::list<BaseParameter*>::iterator it;
+  for (it = parameters.begin(); it != parameters.end(); ++it) {
+    if ((*it)->getMode() == get) {
+      continue;
+    }
+
+    (*it)->fromJson(&obj);
+  }
+
+  writeConfig();
 }
 
 void ConfigManager::clearSettings(bool reboot) {
@@ -291,6 +383,10 @@ void ConfigManager::clearSettings(bool reboot) {
 //
 // ConfigManager HTTP Utilities
 //
+void ConfigManager::disableHTTP() {
+  this->disabledHTTP = true;
+}
+
 void ConfigManager::setWebPort(const int port) {
   this->webPort = port;
 }
@@ -309,8 +405,12 @@ void ConfigManager::createBaseWebServer() {
              std::bind(&ConfigManager::handleAPGet, this));
   server->on("/", HTTPMethod::HTTP_POST,
              std::bind(&ConfigManager::handleAPPost, this));
+  DebugPrintln("Index page registered");
+
   server->on("/scan", HTTPMethod::HTTP_GET,
              std::bind(&ConfigManager::handleScanGet, this));
+  DebugPrintln("Scan page registered");
+
   server->onNotFound(std::bind(&ConfigManager::handleNotFound, this));
 }
 
@@ -360,83 +460,29 @@ void ConfigManager::handleAPPost() {
 }
 
 void ConfigManager::handleScanGet() {
-  DynamicJsonDocument doc(1024);
-  JsonArray jsonArray = doc.createNestedArray();
-
-  DebugPrintln("Scanning WiFi networks...");
-  int n = WiFi.scanNetworks();
-  DebugPrintln("scan complete");
-  if (n == 0) {
-    DebugPrintln("no networks found");
-  } else {
-    DebugPrint(n);
-    DebugPrintln(" networks found:");
-
-    for (int i = 0; i < n; ++i) {
-      String ssid = WiFi.SSID(i);
-      int rssi = WiFi.RSSI(i);
-      String security =
-          WiFi.encryptionType(i) == WIFI_OPEN ? "none" : "enabled";
-
-      DebugPrint("Name: ");
-      DebugPrint(ssid);
-      DebugPrint(" - Strength: ");
-      DebugPrint(rssi);
-      DebugPrint(" - Security: ");
-      DebugPrintln(security);
-
-      JsonObject obj = doc.createNestedObject();
-      obj["ssid"] = ssid;
-      obj["strength"] = rssi;
-      obj["security"] = security == "none" ? false : true;
-      jsonArray.add(obj);
-    }
-  }
-
-  String body;
-  serializeJson(jsonArray, body);
-
+  String body = scanNetworks();
   server->send(200, FPSTR(mimeJSON), body);
 }
 
-void ConfigManager::handleRESTGet() {
-  DynamicJsonDocument doc(1024);
-  JsonObject obj = doc.createNestedObject();
-
-  std::list<BaseParameter*>::iterator it;
-  for (it = parameters.begin(); it != parameters.end(); ++it) {
-    if ((*it)->getMode() == set) {
-      continue;
-    }
-
-    (*it)->toJson(&obj);
-  }
-
+void ConfigManager::handleSettingsGetREST() {
+  JsonObject obj = asJson();
   String body;
   serializeJson(obj, body);
 
+  Serial.println(body);
   server->send(200, FPSTR(mimeJSON), body);
 }
 
-void ConfigManager::handleRESTPut() {
+void ConfigManager::handleSettingsPutREST() {
   DynamicJsonDocument doc(1024);
   auto error = deserializeJson(doc, server->arg("plain"));
   if (error) {
     server->send(400, FPSTR(mimeJSON), "");
     return;
   }
+
   JsonObject obj = doc.as<JsonObject>();
-
-  std::list<BaseParameter*>::iterator it;
-  for (it = parameters.begin(); it != parameters.end(); ++it) {
-    if ((*it)->getMode() == get) {
-      continue;
-    }
-
-    (*it)->fromJson(&obj);
-  }
-
-  writeConfig();
+  updateFromJson(obj);
 
   server->send(204, FPSTR(mimeJSON), "");
 }
@@ -482,9 +528,9 @@ String ConfigManager::toStringIP(IPAddress ip) {
   return res;
 }
 
-#if defined(localbuild)
-// used to compile the project from the project and not as a library from
-// another one
+#ifdef LOCALBUILD
+// used to compile the project from the project and not
+// as a library from another one
 void setup() {}
 void loop() {}
 #endif
